@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "es_detection_prediction"
+version = "0.1.0"
+description = "EEG seizure detection and prediction on CHB-MIT."
+requires-python = ">=3.10"
+readme = "README.md"
+authors = [{ name = "Kartik Jalal" }]
+dependencies = [
+    "jupyter",
+    "mne[full]",
+    "torch",
+    "mlflow",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

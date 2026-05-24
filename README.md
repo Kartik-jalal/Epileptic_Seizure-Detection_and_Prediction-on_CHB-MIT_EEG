@@ -1,1 +1,1 @@
-# Seizure_Detection_EEG-CHB_MIT
+# Epileptic Seizure Detection & Prediction on CHB-MIT EEG

@@ -1,13 +1,27 @@
-"""Read CHB-MIT EEG records and their seizure annotations.
+"""Read CHB-MIT EEG records and place them on a per-subject continuous timeline.
 
-This module is the entry point of the data pipeline. It parses each subject's
-``chbXX-summary.txt`` to recover the ground-truth seizure intervals, loads the
-matching ``.edf`` recordings via MNE, and harmonises the channel set to the fixed
-22-channel bipolar montage defined in ``config.yaml``.
+This module is the entry point of the data pipeline. For each subject it:
+
+1. Parses ``chbXX-summary.txt`` to recover the ground-truth seizure
+   intervals (onset/offset in seconds, relative to each record).
+2. Loads every ``.edf`` via MNE and **orders the subject's records by EDF
+   ``meas_date``** — filename order is not always chronological in CHB-MIT
+   (``chb02_16+.edf`` lexically precedes ``chb02_16.edf`` though it was
+   recorded ~1 hour later, and ``chb03_24/25`` are numbered out of
+   chronological order). Seizure annotations are still sourced from the
+   summary file; absolute timing comes from the EDF header.
+3. Harmonises each record to the fixed 22-channel bipolar montage defined
+   in ``config.yaml``.
+4. Walks the chronologically-sorted records and accumulates a per-subject
+   timer so every record carries an absolute ``record_starts_at`` /
+   ``record_ends_at`` (seconds since the start of that subject's first
+   recording). Downstream code uses this timeline to enforce the 4-hour
+   interictal buffer across neighbouring records.
 
 Records missing any of the required channels are still returned (marked
-``is_valid=False``) because their seizure positions are needed downstream
-when enforcing the 4-hour interictal buffer across neighbouring records from the same subject.
+``is_valid=False``) because their seizure positions and timeline positions
+are needed for the 4-hour buffer of their neighbours, even though they
+themselves can't contribute training windows.
 """
 
 import mne
@@ -139,8 +153,10 @@ def load_seizure_annotations(chb_mit_dir : Path) -> dict:
 
 
 def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
-    """Load every CHB-MIT EDF record and tag it with its seizure annotations.
+    """Load every CHB-MIT EDF, harmonise channels, and place each on the subject's timeline.
 
+    Channel harmonisation
+    ---------------------
     The CHB-MIT channel set varies across recordings — some files contain
     ECG, VNS markers, or a duplicate ``T8-P8`` column (an archival
     artifact: ``T8-P8-0`` and ``T8-P8-1``). To keep the model input shape
@@ -151,11 +167,21 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
     2. Marks records still missing any ``allowed_channels`` as
        ``is_valid=False`` and stores them with ``raw=None``. They are kept
        in the returned list (not silently dropped) because the downstream
-       interictal buffer is computed across the full
-       chronological recording timeline of a subject, including records
-       whose EEG will not be used for training.
+       interictal buffer is computed across the full chronological
+       recording timeline of a subject, including records whose EEG will
+       not be used for training.
     3. For valid records, drops every channel outside ``allowed_channels``
        so the surviving channel set is exactly the configured montage.
+
+    Per-subject timeline construction
+    ---------------------------------
+    Within each subject, records are sorted by EDF ``meas_date`` (filename
+    order is not reliable — see the module docstring). A timer initialised
+    to ``0.0`` at the subject's first record then accumulates each record's
+    duration plus the silent gap to the next record, so that every record
+    carries its position on the subject's continuous wall-clock timeline.
+    The timer is reset for each new subject because cross-subject
+    continuity has no physical meaning.
 
     Args:
         chb_mit_dir: Root of the CHB-MIT dataset.
@@ -171,15 +197,24 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                 "is_valid": bool,                     # True iff all allowed_channels present
                 "raw": mne.io.Raw | None,             # None when is_valid is False
                 "seizure_info": dict,                 # see load_seizure_annotations
-                "record_meas_date": datetime,         # absolute recording start time
+                "record_meas_date": datetime,         # absolute recording start time (from EDF header)
                 "record_total_duration": timedelta,   # full record length
+                "record_starts_at": float,            # seconds since this subject's first record start
+                "record_ends_at": float,              # record_starts_at + record_total_duration
+                "buffer": float,                      # silent gap (s) since the previous record; 0.0 for the first
             }
 
-        Entries are ordered by subject then by sorted EDF filename, which
-        mirrors the chronological order in which CHB-MIT records were
-        collected.
+        Entries are ordered by subject, then chronologically (by EDF
+        ``meas_date``) within each subject.
+
+    Raises:
+        AssertionError: If any record's ``meas_date`` is missing from the
+            EDF header, if two consecutive records share a ``meas_date``
+            (suggests a duplicate EDF), or if the computed buffer is
+            negative (this record overlaps in real time with the previous
+            one — the meas_date check alone cannot catch this).
     """
-    subject_records = load_seizure_annotations(chb_mit_dir)
+    subject_seizure_annotations = load_seizure_annotations(chb_mit_dir)
 
     raws = []
 
@@ -187,9 +222,35 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
         if not subject.name.startswith("chb"):
             continue
 
-        for record in sorted(subject.glob("*.edf")):
+        # Pre-pass: load every EDF for this subject so we can sort by
+        # meas_date. Filename order is NOT reliable in CHB-MIT —
+        # `chb02_16+.edf` lexically sorts before `chb02_16.edf` despite
+        # being recorded ~1 hour later, and `chb03_24/25` are numbered out
+        # of chronological order. Sorting by meas_date fixes all such cases
+        # uniformly without hardcoding subject-specific swaps.
+        records = []
+        for record in subject.glob("*.edf"):
             raw = mne.io.read_raw_edf(record)
+            # CHB-MIT stated sample freq is 256 Hz for every record
+            # Catch off-spec records here rather than late
+            assert raw.info['sfreq'] == 256, (
+                f"{subject.name}/{record.name}: sample rate is "
+                f"{raw.info['sfreq']} Hz, expected 256 Hz"
+            )
+            assert raw.info["meas_date"] is not None, (
+                f"{subject.name}/{record.name} has no meas_date in EDF header"
+            )
+            records.append((record, raw))
+        records.sort(key=lambda pr: pr[1].info["meas_date"])
 
+        # Per-subject timeline state. The timer is reset for each new
+        # subject because cross-subject continuity has no physical meaning.
+        timer = 0.
+        previous_record_flag = False
+        prev_record_meas_date = None
+        prev_record_total_duration = None
+
+        for record, raw in records:
             # Some CHB-MIT records archive T8-P8 twice (T8-P8-0 and T8-P8-1
             # are bitwise identical). Drop the duplicate and normalise the
             # remaining name to match `allowed_channels`.
@@ -199,13 +260,63 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
 
             # Records with no seizures still need a placeholder entry so
             # downstream code can iterate over `seizure_info` uniformly.
-            if record.name in subject_records[subject.name]:
-                seizure_info = subject_records[subject.name][record.name]
+            if record.name in subject_seizure_annotations[subject.name]:
+                seizure_info = subject_seizure_annotations[subject.name][record.name]
             else:
                 seizure_info = {"no_of_seizures": 0, "seizures": []}
 
             record_meas_date = raw.info["meas_date"]
             record_total_duration = timedelta(seconds=raw.n_times / raw.info['sfreq'])
+
+            # Summary.txt is human-typed and can list seizure offsets past
+            # the EDF's actual end (data-entry error or post-hoc EDF
+            # truncation). Catch it here rather than later when window
+            # slicing tries to read past raw.n_times.
+            for seizure_start, seizure_end in seizure_info["seizures"]:
+                assert seizure_end <= record_total_duration.total_seconds(), (
+                    f"{subject.name}/{record.name}: seizure "
+                    f"[{seizure_start}, {seizure_end}] exceeds record "
+                    f"duration ({record_total_duration.total_seconds():.1f}s)"
+                )
+
+            # Silent gap (s) between the end of the previous record and the
+            # start of this one, measured from EDF meas_dates. 0.0 for the
+            # first record of each subject.
+            buffer = 0.
+            if previous_record_flag:
+                # Strict-increasing meas_date catches duplicate timestamps
+                # (which would otherwise produce buffer = 0 and silently
+                # overlap two records on the timeline).
+                assert record_meas_date > prev_record_meas_date, (
+                    f"{subject.name}/{record.name} shares a meas_date with "
+                    f"its previous record — possible duplicate EDF"
+                )
+
+                buffer = record_meas_date - prev_record_meas_date
+                buffer = buffer.total_seconds() - prev_record_total_duration.total_seconds()
+
+                # ...but a strictly-later meas_date is NOT sufficient: it
+                # still allows this record's meas_date to fall inside the
+                # previous record's recording window (i.e. the two EDFs
+                # overlap in real time). That would produce a negative
+                # buffer and silently corrupt the subject's timeline, so
+                # assert non-overlap explicitly.
+                assert buffer >= 0, (
+                    f"{subject.name}/{record.name}: negative buffer "
+                    f"({buffer:.1f}s) — meas_date falls inside the previous "
+                    f"record's recording window (overlapping EDFs)"
+                )
+
+            # Place this record on the subject's continuous timeline, then
+            # advance the timer and snapshot the meas_date/duration for
+            # the next iteration's buffer computation.
+            record_starts_at = timer + buffer
+            record_ends_at = record_starts_at + record_total_duration.total_seconds()
+
+            timer = record_ends_at
+            previous_record_flag = True
+            prev_record_meas_date = record_meas_date
+            prev_record_total_duration = record_total_duration
 
             if not set(allowed_channels).issubset(set(raw.ch_names)):
                 # Cannot contribute training windows, but the metadata
@@ -220,7 +331,10 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                     "raw": None,
                     "seizure_info": seizure_info,
                     "record_meas_date": record_meas_date,
-                    "record_total_duration": record_total_duration
+                    "record_total_duration": record_total_duration,
+                    "record_starts_at": record_starts_at,
+                    "record_ends_at": record_ends_at,
+                    "buffer": buffer
                 })
             else:
                 # Strip everything outside the configured montage so every
@@ -236,7 +350,10 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                     "raw": raw,
                     "seizure_info": seizure_info,
                     "record_meas_date": record_meas_date,
-                    "record_total_duration": record_total_duration
+                    "record_total_duration": record_total_duration,
+                    "record_starts_at": record_starts_at,
+                    "record_ends_at": record_ends_at,
+                    "buffer": buffer
                 })
 
     return raws

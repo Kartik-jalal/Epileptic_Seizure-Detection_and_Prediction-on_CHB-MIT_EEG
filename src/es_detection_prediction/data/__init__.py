@@ -7,9 +7,13 @@ Currently exposes the two CHB-MIT ingest helpers from ``dataloader``:
   on its own for sanity checks or dataset statistics without touching the
   EDFs.
 - :func:`load_records` — load every ``.edf`` into MNE ``Raw`` objects,
-  harmonise to the 22-channel bipolar montage from ``config.yaml``, and
-  attach the seizure annotations and per-record metadata. The standard
-  entry point for the rest of the pipeline.
+  sort each subject's records chronologically by EDF ``meas_date``
+  (filename order is unreliable for some subjects), harmonise to the
+  22-channel bipolar montage from ``config.yaml``, attach seizure
+  annotations, and place every record on the subject's continuous
+  wall-clock timeline so each one knows its absolute start/end relative to
+  the subject's first recording (needed for the 4-hour interictal buffer).
+  The standard entry point for the rest of the pipeline.
 """
 
 from .dataloader import (

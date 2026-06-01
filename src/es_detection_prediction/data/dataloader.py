@@ -15,12 +15,12 @@ This module is the entry point of the data pipeline. For each subject it:
 4. Walks the chronologically-sorted records and accumulates a per-subject
    timer so every record carries an absolute ``record_starts_at`` /
    ``record_ends_at`` (seconds since the start of that subject's first
-   recording). Downstream code uses this timeline to enforce the 4-hour
+   recording). Downstream code uses this timeline to enforce the n-hour
    ictal buffer across neighbouring records.
 
 Records missing any of the required channels are still returned (marked
 ``is_valid=False``) because their seizure positions and timeline positions
-are needed for the 4-hour ictal buffer of their neighbours, even though they
+are needed for the n-hour ictal buffer of their neighbours, even though they
 themselves can't contribute training windows.
 """
 
@@ -320,7 +320,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
 
             if not set(allowed_channels).issubset(set(raw.ch_names)):
                 # Cannot contribute training windows, but the metadata
-                # (especially seizure times) still matters: the 4-hour
+                # (especially seizure times) still matters: the n-hour
                 # ictal buffer is computed across all
                 # records of a subject, so excluding this entry entirely
                 # would corrupt the buffer for its neighbours.

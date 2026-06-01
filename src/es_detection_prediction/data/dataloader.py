@@ -3,7 +3,7 @@
 This module is the entry point of the data pipeline. For each subject it:
 
 1. Parses ``chbXX-summary.txt`` to recover the ground-truth seizure
-   intervals (onset/offset in seconds, relative to each record).
+   intervals (sorted onset/offset in seconds, relative to each record).
 2. Loads every ``.edf`` via MNE and **orders the subject's records by EDF
    ``meas_date``** — filename order is not always chronological in CHB-MIT
    (``chb02_16+.edf`` lexically precedes ``chb02_16.edf`` though it was
@@ -35,7 +35,7 @@ def load_seizure_annotations(chb_mit_dir : Path) -> dict:
 
     Each CHB-MIT subject directory contains a ``chbXX-summary.txt`` listing
     every recording for that subject and, for each recording, the number of
-    seizures and the onset/offset times (in seconds from the start of that
+    seizures and the sorted onset/offset times (in seconds from the start of that
     recording). This function walks the summary file line by line, pairs
     each ``Seizure ... Start Time`` with its following ``Seizure ... End
     Time``, and validates that the parsed count matches the declared
@@ -104,7 +104,7 @@ def load_seizure_annotations(chb_mit_dir : Path) -> dict:
                     )
                 seizure_info[record] = {
                     "no_of_seizures": no_of_seizures,
-                    "seizures": seizures_present,
+                    "seizures": sorted(seizures_present), # sort all the seizures present based on thier onset/offset 
                 }
 
             for line in summary_file:

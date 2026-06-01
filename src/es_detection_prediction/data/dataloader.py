@@ -16,11 +16,11 @@ This module is the entry point of the data pipeline. For each subject it:
    timer so every record carries an absolute ``record_starts_at`` /
    ``record_ends_at`` (seconds since the start of that subject's first
    recording). Downstream code uses this timeline to enforce the 4-hour
-   interictal buffer across neighbouring records.
+   ictal buffer across neighbouring records.
 
 Records missing any of the required channels are still returned (marked
 ``is_valid=False``) because their seizure positions and timeline positions
-are needed for the 4-hour buffer of their neighbours, even though they
+are needed for the 4-hour ictal buffer of their neighbours, even though they
 themselves can't contribute training windows.
 """
 
@@ -167,7 +167,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
     2. Marks records still missing any ``allowed_channels`` as
        ``is_valid=False`` and stores them with ``raw=None``. They are kept
        in the returned list (not silently dropped) because the downstream
-       interictal buffer is computed across the full chronological
+       ictal buffer is computed across the full chronological
        recording timeline of a subject, including records whose EEG will
        not be used for training.
     3. For valid records, drops every channel outside ``allowed_channels``
@@ -201,7 +201,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                 "record_total_duration": timedelta,   # full record length
                 "record_starts_at": float,            # seconds since this subject's first record start
                 "record_ends_at": float,              # record_starts_at + record_total_duration
-                "buffer": float,                      # silent gap (s) since the previous record; 0.0 for the first
+                "gap": float,                         # silent gap (s) since the previous record; 0.0 for the first
             }
 
         Entries are ordered by subject, then chronologically (by EDF
@@ -210,7 +210,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
     Raises:
         AssertionError: If any record's ``meas_date`` is missing from the
             EDF header, if two consecutive records share a ``meas_date``
-            (suggests a duplicate EDF), or if the computed buffer is
+            (suggests a duplicate EDF), or if the computed gap is
             negative (this record overlaps in real time with the previous
             one — the meas_date check alone cannot catch this).
     """
@@ -282,35 +282,35 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
             # Silent gap (s) between the end of the previous record and the
             # start of this one, measured from EDF meas_dates. 0.0 for the
             # first record of each subject.
-            buffer = 0.
+            gap = 0.
             if previous_record_flag:
                 # Strict-increasing meas_date catches duplicate timestamps
-                # (which would otherwise produce buffer = 0 and silently
+                # (which would otherwise produce gap = 0 and silently
                 # overlap two records on the timeline).
                 assert record_meas_date > prev_record_meas_date, (
                     f"{subject.name}/{record.name} shares a meas_date with "
                     f"its previous record — possible duplicate EDF"
                 )
 
-                buffer = record_meas_date - prev_record_meas_date
-                buffer = buffer.total_seconds() - prev_record_total_duration.total_seconds()
+                gap = record_meas_date - prev_record_meas_date
+                gap = gap.total_seconds() - prev_record_total_duration.total_seconds()
 
                 # ...but a strictly-later meas_date is NOT sufficient: it
                 # still allows this record's meas_date to fall inside the
                 # previous record's recording window (i.e. the two EDFs
                 # overlap in real time). That would produce a negative
-                # buffer and silently corrupt the subject's timeline, so
+                # gap and silently corrupt the subject's timeline, so
                 # assert non-overlap explicitly.
-                assert buffer >= 0, (
-                    f"{subject.name}/{record.name}: negative buffer "
-                    f"({buffer:.1f}s) — meas_date falls inside the previous "
+                assert gap >= 0, (
+                    f"{subject.name}/{record.name}: negative gap "
+                    f"({gap:.1f}s) — meas_date falls inside the previous "
                     f"record's recording window (overlapping EDFs)"
                 )
 
             # Place this record on the subject's continuous timeline, then
             # advance the timer and snapshot the meas_date/duration for
-            # the next iteration's buffer computation.
-            record_starts_at = timer + buffer
+            # the next iteration's gap computation.
+            record_starts_at = timer + gap
             record_ends_at = record_starts_at + record_total_duration.total_seconds()
 
             timer = record_ends_at
@@ -321,7 +321,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
             if not set(allowed_channels).issubset(set(raw.ch_names)):
                 # Cannot contribute training windows, but the metadata
                 # (especially seizure times) still matters: the 4-hour
-                # interictal buffer is computed across all
+                # ictal buffer is computed across all
                 # records of a subject, so excluding this entry entirely
                 # would corrupt the buffer for its neighbours.
                 raws.append({
@@ -334,7 +334,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                     "record_total_duration": record_total_duration,
                     "record_starts_at": record_starts_at,
                     "record_ends_at": record_ends_at,
-                    "buffer": buffer
+                    "gap": gap
                 })
             else:
                 # Strip everything outside the configured montage so every
@@ -353,7 +353,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                     "record_total_duration": record_total_duration,
                     "record_starts_at": record_starts_at,
                     "record_ends_at": record_ends_at,
-                    "buffer": buffer
+                    "gap": gap
                 })
 
     return raws

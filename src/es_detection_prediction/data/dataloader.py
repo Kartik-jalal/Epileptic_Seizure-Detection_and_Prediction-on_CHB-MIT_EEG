@@ -198,7 +198,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                 "raw": mne.io.Raw | None,             # None when is_valid is False
                 "seizure_info": dict,                 # see load_seizure_annotations
                 "record_meas_date": datetime,         # absolute recording start time (from EDF header)
-                "record_total_duration": timedelta,   # full record length
+                "record_total_duration": timedelta,   # full record length - time of last sample (raw.times[-1]); usable as MNE crop tmax
                 "record_starts_at": float,            # seconds since this subject's first record start
                 "record_ends_at": float,              # record_starts_at + record_total_duration
                 "gap": float,                         # silent gap (s) since the previous record; 0.0 for the first
@@ -266,7 +266,7 @@ def load_records(chb_mit_dir : Path, allowed_channels : list) -> list:
                 seizure_info = {"no_of_seizures": 0, "seizures": []}
 
             record_meas_date = raw.info["meas_date"]
-            record_total_duration = timedelta(seconds=raw.n_times / raw.info['sfreq'])
+            record_total_duration = timedelta(seconds=raw.times[-1])
 
             # Summary.txt is human-typed and can list seizure offsets past
             # the EDF's actual end (data-entry error or post-hoc EDF

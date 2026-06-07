@@ -20,6 +20,20 @@ Currently exposes:
   timeline, is long enough for at least one ``segment_length`` segment). Interictal
   pool entries carry record-relative ``interictal_period_starts_at`` /
   ``interictal_period_ends_at`` bounds for direct use with MNE Raw.
+- :func:`summarize_records` / :func:`print_record_summary` — dataset-level
+  stats over the loader output, split into ``valid`` / ``invalid`` buckets
+  (channel-set match) with combined + valid-only + invalid-only views.
+  The first is pure compute; the second is the human-readable formatter.
+  Useful as a sanity check after loading and for cross-referencing the
+  paper's "total available" / "observed" headline figures.
+- :func:`summarize_eligible_records` / :func:`print_eligible_records_summary`
+  — counterparts to the loader summaries but over the segmentation pools
+  returned by :func:`find_eligible_records`. Includes fittable-segment
+  counts and the list of subjects excluded from the interictal pool by
+  the ictal buffer.
+- :func:`print_excluded_subject_details` — diagnostic dump for those
+  excluded subjects (per-record seizure counts, durations and record
+  length), so you can see *why* the buffer rejected them.
 """
 
 from .dataloader import (
@@ -29,6 +43,13 @@ from .dataloader import (
 from .segmentation import (
   find_eligible_records
 )
+from .summary import (
+  summarize_records,
+  print_record_summary,
+  summarize_eligible_records,
+  print_eligible_records_summary,
+  print_excluded_subject_details,
+)
 
 __all__ = [
   # from dataloader
@@ -36,4 +57,10 @@ __all__ = [
   "load_records",
   # from segmentation
   "find_eligible_records",
+  # from summary
+  "summarize_records",
+  "print_record_summary",
+  "summarize_eligible_records",
+  "print_eligible_records_summary",
+  "print_excluded_subject_details",
 ]

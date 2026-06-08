@@ -1,4 +1,4 @@
-"""Data subpackage: CHB-MIT loading, segmentation, and (later) windowing.
+"""Data subpackage: CHB-MIT loading, segmentation, filtering, and (later) windowing.
 
 Currently exposes:
 
@@ -20,6 +20,14 @@ Currently exposes:
   timeline, is long enough for at least one ``segment_length`` segment). Interictal
   pool entries carry record-relative ``interictal_period_starts_at`` /
   ``interictal_period_ends_at`` bounds for direct use with MNE Raw.
+- :func:`filter_and_save_records` / :func:`band_pass_filtering` — band-pass
+  filter every record in a segmentation pool **once** and cache to disk
+  as FIF so the downstream ``Dataset`` never re-filters per window. Cache
+  directory is bandpass-versioned (``bp_{l_freq}-{h_freq}_{h_trans_bandwidth}/``) 
+  and writes are idempotent (existing FIFs are re-used), so interrupted runs resume
+  for free. After the call returns, each pool record carries a
+  ``filtered_path`` key pointing at its cached FIF. The first function is
+  the per-record worker; the second is the per-pool orchestrator.
 - :func:`summarize_records` / :func:`print_record_summary` — dataset-level
   stats over the loader output, split into ``valid`` / ``invalid`` buckets
   (channel-set match) with combined + valid-only + invalid-only views.
@@ -43,6 +51,10 @@ from .dataloader import (
 from .segmentation import (
   find_eligible_records
 )
+from .preprocessing import (
+  filter_and_save_records,
+  band_pass_filtering,
+)
 from .summary import (
   summarize_records,
   print_record_summary,
@@ -57,6 +69,9 @@ __all__ = [
   "load_records",
   # from segmentation
   "find_eligible_records",
+  # from preprocessing
+  "filter_and_save_records",
+  "band_pass_filtering",
   # from summary
   "summarize_records",
   "print_record_summary",

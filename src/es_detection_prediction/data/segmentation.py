@@ -48,8 +48,8 @@ def find_eligible_records(
     2. Walks the subject's records in chronological order. Records that are
        marked ``is_valid=False`` by the loader (channel-set mismatch) are
        skipped entirely — they can't contribute training segments.
-    3. Records with one or more seizures go into ``ictal_records[subject]``
-       unchanged.
+    3. Records with one or more seizures are shallow-copied (``dict.copy()``)
+       and pushed to ``ictal_records[subject]``.
     4. No-seizure records have their candidate interictal interval
        ``[record_starts_at, record_ends_at]`` trimmed by:
 
@@ -89,10 +89,10 @@ def find_eligible_records(
         subject (e.g. ``"chb01"``). Each value is a list of record dicts following
         the order present in ``records`` for each subject.
 
-        - ``ictal_records[subject]`` entries are the original loader dicts
-          (same object identity — not copied).
+        - ``ictal_records[subject]`` entries are shallow copies of the
+          loader dicts (via ``dict.copy()``).
         - ``interictal_records[subject]`` entries are shallow copies of the
-          loader dicts extended with two extra keys::
+          loader dicts (via ``{**record, ...}``) extended with two extra keys::
 
               "interictal_period_starts_at": float  # record-relative seconds
               "interictal_period_ends_at":   float  # record-relative seconds
@@ -100,6 +100,15 @@ def find_eligible_records(
           Both bounds satisfy
           ``0.0 <= ... <= record_total_duration.total_seconds()`` and
           ``end - start >= segment_length``.
+
+        Both pools use *shallow* copies — mutating a pool entry's dict
+        (e.g. adding ``filtered_path`` after filtering) does not affect
+        the loader records list. However ``record["raw"]`` is shared by
+        reference with the loader record across all three views (loader
+        list + one pool), so in-place mutation of the MNE ``Raw`` itself
+        would leak. Currently nothing in the pipeline does that — workers
+        operate on pickled subprocess copies, and the parent treats
+        ``raw`` as read-only.
 
     Notes:
         Subjects whose seizures are too dense for any buffer-distant
@@ -149,7 +158,12 @@ def find_eligible_records(
                 continue
 
             if record["seizure_info"]["no_of_seizures"] > 0:
-                ictal_records[subject].append(record)
+                # Shallow copy: dict-level mutations (e.g. `filtered_path`
+                # added later by band_pass_filtering) stay local to the pool
+                # entry and don't leak back to the loader records list.
+                # `record["raw"]` is still shared by reference — see the
+                # Returns docstring for the read-only-raw caveat.
+                ictal_records[subject].append(record.copy())
                 continue
 
             # No-seizure record: trim its [start, end] in absolute timeline
@@ -193,9 +207,12 @@ def find_eligible_records(
             if interictal_abs_end - interictal_abs_start < segment_length:
                 continue
 
-            # Store the trimmed bounds in record-relative seconds so they
-            # match `seizure_info`'s convention and can be used directly
-            # against MNE Raw's per-record time axis.
+            # `{**record, ...}` is also a shallow copy (same semantics as
+            # `dict.copy()` used for the ictal branch), extended with the
+            # two new keys below. The trimmed bounds are stored in
+            # record-relative seconds so they match `seizure_info`'s
+            # convention and can be used directly against MNE Raw's
+            # per-record time axis.
             interictal_records[subject].append({
                 **record,
                 "interictal_period_starts_at": interictal_abs_start - record_start,

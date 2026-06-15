@@ -14,7 +14,9 @@ Currently exposes:
   wall-clock timeline so each one knows its absolute start/end relative to
   the subject's first recording (needed for the n-hour ictal buffer).
 - :func:`find_eligible_records` — given the loader output, partition records
-  per subject into an ictal pool (records that contain seizures) and an
+  per subject into an ictal pool (records with at least one seizure of
+  duration ≥ ``segment_length``; pool entries carry a filtered
+  ``seizure_info["seizures"]`` list with only those usable seizures) and an
   interictal pool (no-seizure records whose surviving sub-interval, after
   applying the n-hour ictal buffer on each side of every seizure on the subject's
   timeline, is long enough for at least one ``segment_length`` segment). Interictal
@@ -23,11 +25,19 @@ Currently exposes:
 - :func:`filter_and_save_records` / :func:`band_pass_filtering` — band-pass
   filter every record in a segmentation pool **once** and cache to disk
   as FIF so the downstream ``Dataset`` never re-filters per window. Cache
-  directory is bandpass-versioned (``bp_{l_freq}-{h_freq}_{h_trans_bandwidth}/``) 
+  directory is bandpass-versioned (``bp_{l_freq}-{h_freq}_{h_trans_bandwidth}/``)
   and writes are idempotent (existing FIFs are re-used), so interrupted runs resume
   for free. After the call returns, each pool record carries a
   ``filtered_path`` key pointing at its cached FIF. The first function is
   the per-record worker; the second is the per-pool orchestrator.
+- :func:`enumerate_windows` / :func:`get_record_windows` — turn the
+  per-record bounds produced by :func:`find_eligible_records` into a list
+  of concrete ``(window_start, window_end)`` tuples in record-relative
+  seconds. The first is the primitive (works on any
+  ``[start, end]``); the second dispatches on a 0/1 label and handles
+  the ictal multi-seizure flattening. Used by ``Dataset.__init__`` so
+  every window enumerated here can be passed straight to
+  ``raw.get_data(tmin=..., tmax=...)``.
 - :func:`summarize_records` / :func:`print_record_summary` — dataset-level
   stats over the loader output, split into ``valid`` / ``invalid`` buckets
   (channel-set match) with combined + valid-only + invalid-only views.
@@ -55,6 +65,10 @@ from .preprocessing import (
   filter_and_save_records,
   band_pass_filtering,
 )
+from .windowing import (
+  enumerate_windows,
+  get_record_windows,
+)
 from .summary import (
   summarize_records,
   print_record_summary,
@@ -72,6 +86,9 @@ __all__ = [
   # from preprocessing
   "filter_and_save_records",
   "band_pass_filtering",
+  # from windowing
+  "enumerate_windows",
+  "get_record_windows",
   # from summary
   "summarize_records",
   "print_record_summary",

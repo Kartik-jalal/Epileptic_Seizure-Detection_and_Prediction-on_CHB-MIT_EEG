@@ -20,7 +20,13 @@ pair returned by ``find_eligible_records``):
 - :func:`summarize_eligible_records` — pure compute. Returns a single
   structured dict with ictal-pool and interictal-pool counts, durations,
   and fittable ``segment_length``-second segment counts, plus the set of
-  subjects excluded from the interictal pool by the buffer.
+  subjects excluded from the interictal pool by the buffer. These counts
+  reflect what's in the pool *after* the per-seizure / per-period
+  ``segment_length`` filter: ictal counts only seizures ≥
+  ``segment_length``, interictal counts only records whose trimmed
+  sub-interval reached ``segment_length``. Comparing these numbers
+  against :func:`summarize_records`'s (which counts every annotated
+  seizure / no-seizure record) shows what the eligibility filters cost.
 - :func:`print_eligible_records_summary` — convenience formatter. Prints
   the segmentation-pool counts as one block, including just the *names*
   of excluded subjects.
@@ -247,14 +253,24 @@ def summarize_eligible_records(
 
             ictal_subjects:               set[str]  # subjects with >=1 ictal record
             ictal_records:                int       # total ictal records across subjects
-            ictal_events:                 int       # sum of no_of_seizures across ictal records
-            ictal_duration:               float     # sum of seizure (end - start) in seconds
+            ictal_events:                 int       # sum of no_of_seizures across ictal records (post-filter — see Note)
+            ictal_duration:               float     # sum of seizure (end - start) in seconds (post-filter)
             ictal_segments:               int       # sum of (seizure_dur // segment_length) per seizure
             interictal_subjects:          set[str]  # subjects with >=1 valid interictal record
             interictal_records:           int       # total interictal records across subjects
             interictal_duration:          float     # sum of trimmed interictal-period lengths in seconds
             interictal_segments:          int       # sum of (period_dur // segment_length) per record
             excluded_interictal_subjects: set[str]  # in ictal pool but not in interictal pool
+
+    Note:
+        ``ictal_events`` / ``ictal_duration`` here reflect only the
+        seizures that survived the per-seizure ≥ ``segment_length``
+        filter in :func:`...segmentation.find_eligible_records`. They can
+        be **smaller** than :func:`summarize_records`'s ``ictal_events`` /
+        ``ictal_duration`` (which count every annotated seizure). The
+        delta between the two is the number / duration of seizures too
+        short to yield a window — useful to see when validating a
+        ``segment_length`` choice.
     """
     ictal_subjects: set = set()
     n_ictal_records = 0

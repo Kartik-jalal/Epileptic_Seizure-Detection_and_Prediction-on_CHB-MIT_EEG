@@ -5,16 +5,20 @@ placed on a per-subject continuous wall-clock timeline) and the downstream
 window-extraction / labelling step. It does NOT assign per-window labels —
 but it *does* identify, for each loader record:
 
-- whether the record contains any seizures (so its ictal windows can be
-  extracted downstream), and
+- whether the record contains at least one seizure of duration ≥
+  ``segment_length`` (so its ictal windows can be extracted downstream), and
 - if not, which sub-interval of the record (if any) is at least
   ``ictal_buffer`` seconds away from every seizure in the subject's
   continuous timeline.
 
+Both branches apply a symmetric "can this record actually yield at least
+one usable window?" filter — for ictal that's per-seizure duration, for
+interictal that's the trimmed sub-interval length.
+
 The n-hour ictal buffer is enforced in absolute timeline coordinates so the buffer
-naturally spans across record boundaries and across the silent gaps between 
-consecutively-recorded EDFs (captured by the loader's ``gep`` variable on each record).
-A no-seizure record is dropped from the interictal pool if, after trimming, its surviving 
+naturally spans across record boundaries and across the silent gaps between
+consecutively-recorded EDFs (captured by the loader's ``gap`` variable on each record).
+A no-seizure record is dropped from the interictal pool if, after trimming, its surviving
 sub-interval is shorter than one ``segment_length`` segment.
 
 Subjects whose seizures are too dense to permit *any* buffer-distant
@@ -48,8 +52,14 @@ def find_eligible_records(
     2. Walks the subject's records in chronological order. Records that are
        marked ``is_valid=False`` by the loader (channel-set mismatch) are
        skipped entirely — they can't contribute training segments.
-    3. Records with one or more seizures are shallow-copied (``dict.copy()``)
-       and pushed to ``ictal_records[subject]``.
+    3. Records with at least one seizure of duration ≥ ``segment_length``
+       are shallow-copied (``dict.copy()``) and pushed to
+       ``ictal_records[subject]``. The shallow copy's ``seizure_info`` is
+       *replaced* with a fresh dict whose ``seizures`` list contains only
+       those seizures that pass the duration check, so the original
+       loader-record ``seizure_info`` is not mutated. Records whose
+       seizures are all shorter than ``segment_length`` are dropped
+       (symmetric with the interictal-length check in step 5 below).
     4. No-seizure records have their candidate interictal interval
        ``[record_starts_at, record_ends_at]`` trimmed by:
 
@@ -66,7 +76,7 @@ def find_eligible_records(
        into the candidate record; symmetrically for the earliest following
        seizure.
     5. If the surviving sub-interval is shorter than ``segment_length``, the
-       record is skipped (no usable interictal segmant fits). Otherwise the
+       record is skipped (no usable interictal segment fits). Otherwise the
        record is shallow-copied and the new fields
        ``interictal_period_starts_at`` / ``interictal_period_ends_at`` are
        added in **record-relative seconds** (matching the convention used
@@ -90,7 +100,11 @@ def find_eligible_records(
         the order present in ``records`` for each subject.
 
         - ``ictal_records[subject]`` entries are shallow copies of the
-          loader dicts (via ``dict.copy()``).
+          loader dicts (via ``dict.copy()``), with ``seizure_info``
+          deliberately replaced by a *fresh* dict (not shared) containing
+          only seizures ≥ ``segment_length``. So an ictal pool entry's
+          ``seizure_info["seizures"]`` may differ from the loader
+          record's view of that same record.
         - ``interictal_records[subject]`` entries are shallow copies of the
           loader dicts (via ``{**record, ...}``) extended with two extra keys::
 
@@ -103,12 +117,15 @@ def find_eligible_records(
 
         Both pools use *shallow* copies — mutating a pool entry's dict
         (e.g. adding ``filtered_path`` after filtering) does not affect
-        the loader records list. However ``record["raw"]`` is shared by
-        reference with the loader record across all three views (loader
-        list + one pool), so in-place mutation of the MNE ``Raw`` itself
-        would leak. Currently nothing in the pipeline does that — workers
-        operate on pickled subprocess copies, and the parent treats
-        ``raw`` as read-only.
+        the loader records list. ``record["raw"]`` is shared by reference
+        with the loader record across all three views (loader list + one
+        pool), so in-place mutation of the MNE ``Raw`` itself would leak.
+        ``seizure_info`` on ictal-pool entries is the deliberate
+        exception — it's a freshly-allocated dict so the filtered seizure
+        list does not leak back to the loader / subject-annotations
+        views. Currently nothing in the pipeline mutates ``raw`` in the
+        parent — workers operate on pickled subprocess copies — so the
+        sharing is harmless.
 
     Notes:
         Subjects whose seizures are too dense for any buffer-distant
@@ -157,13 +174,28 @@ def find_eligible_records(
                 # carry) stays intact, but we never label them.
                 continue
 
-            if record["seizure_info"]["no_of_seizures"] > 0:
+            if record["seizure_info"]["no_of_seizures"] > 0: # ictal record
+                # only keep ictal records that can contribute at least one
+                # window of `segment_length`.
+                valid_seizures = [
+                    [s, e] for s, e in record["seizure_info"]["seizures"]
+                    if (e - s) >= segment_length
+                ]
+                if not valid_seizures: # symmetric drop
+                    continue
+
                 # Shallow copy: dict-level mutations (e.g. `filtered_path`
                 # added later by band_pass_filtering) stay local to the pool
                 # entry and don't leak back to the loader records list.
-                # `record["raw"]` is still shared by reference — see the
-                # Returns docstring for the read-only-raw caveat.
-                ictal_records[subject].append(record.copy())
+                # `record["raw"]` is still shared by reference
+                ictal_record = record.copy()
+                # Replace seizure_info with a fresh dict so we don't mutate the dict
+                # shared with the loader records list and subject_seizure_annotations.
+                ictal_record["seizure_info"] = {
+                    "no_of_seizures": len(valid_seizures),
+                    "seizures": valid_seizures,
+                }
+                ictal_records[subject].append(ictal_record)
                 continue
 
             # No-seizure record: trim its [start, end] in absolute timeline

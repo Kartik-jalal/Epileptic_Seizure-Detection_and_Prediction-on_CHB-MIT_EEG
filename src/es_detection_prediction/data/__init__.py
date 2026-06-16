@@ -42,9 +42,14 @@ Currently exposes:
   ``__getitem__`` (per ``DataLoader`` worker, so the parent never holds
   an open file descriptor — safe across ``fork()``). Serves
   ``(X, y)`` tensors of shape ``((1, n_channels, n_times), ())`` in
-  ``float32`` / ``long``. Compose many of these via
-  ``torch.utils.data.ConcatDataset`` to build a full LOSO fold; the
-  per-record granularity makes split logic a plain list filter.
+  ``float32`` / ``long``. Exposes ``.subject`` and ``.record_name``
+  attributes so callers can filter post-construction for fold splits.
+- :func:`build_record_datasets` — given a whole pool
+  (``ictal_records`` or ``interictal_records``), returns a flat
+  **list** of :class:`RecordWindowDataset` instances — one per record
+  in the pool — ready to wrap in ``torch.utils.data.ConcatDataset``.
+  Optionally restricted to one ``inter_subject`` for intra-subject
+  training.
 - :func:`summarize_records` / :func:`print_record_summary` — dataset-level
   stats over the loader output, split into ``valid`` / ``invalid`` buckets
   (channel-set match) with combined + valid-only + invalid-only views.
@@ -78,6 +83,7 @@ from .windowing import (
 )
 from .dataset import (
   RecordWindowDataset,
+  build_record_datasets,
 )
 from .summary import (
   summarize_records,
@@ -101,6 +107,7 @@ __all__ = [
   "get_record_windows",
   # from dataset
   "RecordWindowDataset",
+  "build_record_datasets",
   # from summary
   "summarize_records",
   "print_record_summary",

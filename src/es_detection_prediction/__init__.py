@@ -1,3 +1,3 @@
 """EEG seizure detection and prediction on CHB-MIT."""
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"

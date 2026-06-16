@@ -6,6 +6,10 @@ enumerates the record's windows via :func:`get_record_windows`, lazily
 opens the FIF on first access, and serves ``(X, y)`` tensors to the
 training loop.
 
+For building full LOSO folds, :func:`build_record_datasets` returns a
+**list** of ``RecordWindowDataset`` instances — one per record in the
+pool.
+
 Lazy-open semantics (and why it matters for ``DataLoader`` workers)
 -------------------------------------------------------------------
 The cached FIF is opened on the first ``__getitem__`` call, NOT in
@@ -40,8 +44,21 @@ class RecordWindowDataset(Dataset):
 
     Use this together with ``torch.utils.data.ConcatDataset`` to build a
     full training fold: instantiate one ``RecordWindowDataset`` per ictal
-    / interictal pool entry, concatenate them, and wrap in a
-    ``DataLoader``. 
+    / interictal pool entry (typically via :func:`build_record_datasets`),
+    concatenate them, and wrap in a ``DataLoader``.
+
+    Public attributes (useful for post-construction filtering of fold
+    splits):
+
+    - :attr:`subject` (``str``): the subject this record belongs to
+      (e.g. ``"chb05"``). Filter on this for cross-subject splits.
+    - :attr:`record_name` (``str``): the EDF filename this record came
+      from (e.g. ``"chb05_06.edf"``). Filter on this for intra-subject
+      LOSO over seizures.
+    - :attr:`label` (``int``): ``0`` for interictal, ``1`` for ictal.
+    - :attr:`windows` (``list[tuple[float, float]]``): the
+      ``(start, end)`` window bounds in record-relative seconds, as
+      returned by :func:`get_record_windows`.
 
     Tensor types returned by :meth:`__getitem__`:
 
@@ -49,9 +66,10 @@ class RecordWindowDataset(Dataset):
       where ``n_channels`` is the harmonised CHB-MIT bipolar count (22)
       and ``n_times = round(segment_length * sfreq)`` (e.g. 1280 at
       ``segment_length=5`` and ``sfreq=256``). The leading ``1`` is the
-      spatial/depth axis EEGNet's first ``Conv2d`` or any ``Conv2d`` layer expects.
-      ``float32`` is the deep-learning standard — ``float64`` would
-      double memory and compute on GPU with no model-quality gain.
+      spatial/depth axis EEGNet's first ``Conv2d`` (or any ``Conv2d``)
+      layer expects. ``float32`` is the deep-learning standard —
+      ``float64`` would double memory and compute on GPU with no
+      model-quality gain.
     - ``y``: ``long`` (``int64``) scalar tensor. Required by
       :class:`torch.nn.CrossEntropyLoss` and the standard dtype for
       classification heads.
@@ -66,17 +84,18 @@ class RecordWindowDataset(Dataset):
     ):
         """Build the per-window index for one record.
 
-        Does NOT open the cached FIF — only stores the path and the
-        list of windows (in record-relative seconds). The file is
-        opened lazily by :meth:`_ensure_raw` on first
+        Does NOT open the cached FIF — only stores the path, identity
+        metadata, and the list of windows (in record-relative seconds).
+        The file is opened lazily by :meth:`_ensure_raw` on first
         :meth:`__getitem__` call.
 
         Args:
             record: Pool entry from
                 :func:`...segmentation.find_eligible_records`. Must
                 carry a ``filtered_path`` key (attached by
-                :func:`...preprocessing.band_pass_filtering`). The other
-                required keys depend on the ``label`` — see
+                :func:`...preprocessing.band_pass_filtering`) plus
+                ``subject`` and ``record`` (set by the loader). The
+                other required keys depend on the ``label`` — see
                 :func:`get_record_windows`.
             label: ``0`` for interictal, ``1`` for ictal. Kept as an
                 int so it can be passed straight to PyTorch loss
@@ -87,11 +106,13 @@ class RecordWindowDataset(Dataset):
                 ``None`` → non-overlapping (defaults to ``segment_length``
                 inside :func:`enumerate_windows`). Set
                 ``stride < segment_length`` for overlapping windows
-                (knob for inflating training data and
-                easing class imbalance).
+                (knob for inflating training data and easing class
+                imbalance).
         """
         self.filtered_path = record["filtered_path"]
         self.label = label
+        self.subject = record["subject"]
+        self.record_name = record["record"]
         self.windows = get_record_windows(
             record=record,
             label=label,
@@ -134,7 +155,7 @@ class RecordWindowDataset(Dataset):
         Returns:
             ``(X, y)`` where ``X`` is a ``float32`` tensor of shape
             ``(1, n_channels, n_times)`` and ``y`` is a scalar ``long``
-            tensor carrying this record's class label. 
+            tensor carrying this record's class label.
         """
         raw = self._ensure_raw()
         start, end = self.windows[index]
@@ -149,3 +170,43 @@ class RecordWindowDataset(Dataset):
         X = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
         y = torch.tensor(self.label, dtype=torch.long)
         return X, y
+
+
+def build_record_datasets(
+    pool: dict,
+    label: int,
+    segment_length: float,
+    stride: float | None = None,
+    inter_subject: str | None = None,
+) -> list[RecordWindowDataset]:
+    """Construct one :class:`RecordWindowDataset` per pool entry.
+
+    Args:
+        pool: ``ictal_records`` or ``interictal_records`` from
+            :func:`find_eligible_records`. Keyed by subject; values
+            are per-subject lists of record dicts.
+        label: ``0`` for interictal, ``1`` for ictal. Applied to every
+            Dataset produced by this call.
+        segment_length: Forwarded to :class:`RecordWindowDataset`.
+        stride: Forwarded to :class:`RecordWindowDataset`.
+        inter_subject: If given, restrict the build to this subject's
+            records only. Used for **intra-subject (per-patient)
+            training** — the whole working dataset is
+            scoped to one patient before doing LOSO over their own
+            seizures. For **cross-subject** splits,
+            leave this ``None`` and filter on
+            :attr:`RecordWindowDataset.subject` after construction
+            instead.
+
+    Returns:
+        Flat list of :class:`RecordWindowDataset` instances (across
+        every subject in ``pool``, or just one if ``inter_subject`` is
+        set). Wrap in :class:`torch.utils.data.ConcatDataset` to form a
+        single Dataset suitable for ``DataLoader``.
+    """
+    return [
+        RecordWindowDataset(record, label, segment_length, stride)
+        for subject, records in pool.items()
+        if inter_subject is None or subject == inter_subject
+        for record in records
+    ]

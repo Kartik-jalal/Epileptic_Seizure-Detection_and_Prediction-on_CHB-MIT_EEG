@@ -1,4 +1,4 @@
-"""Data subpackage: CHB-MIT loading, segmentation, filtering, and (later) windowing.
+"""Data subpackage: CHB-MIT loading, segmentation, filtering, windowing, and Dataset.
 
 Currently exposes:
 
@@ -35,9 +35,16 @@ Currently exposes:
   of concrete ``(window_start, window_end)`` tuples in record-relative
   seconds. The first is the primitive (works on any
   ``[start, end]``); the second dispatches on a 0/1 label and handles
-  the ictal multi-seizure flattening. Used by ``Dataset.__init__`` so
-  every window enumerated here can be passed straight to
-  ``raw.get_data(tmin=..., tmax=...)``.
+  the ictal multi-seizure flattening. Consumed by
+  :class:`RecordWindowDataset`.
+- :class:`RecordWindowDataset` — PyTorch ``Dataset`` wrapping one
+  filtered record's windows. Lazily opens the cached FIF on first
+  ``__getitem__`` (per ``DataLoader`` worker, so the parent never holds
+  an open file descriptor — safe across ``fork()``). Serves
+  ``(X, y)`` tensors of shape ``((1, n_channels, n_times), ())`` in
+  ``float32`` / ``long``. Compose many of these via
+  ``torch.utils.data.ConcatDataset`` to build a full LOSO fold; the
+  per-record granularity makes split logic a plain list filter.
 - :func:`summarize_records` / :func:`print_record_summary` — dataset-level
   stats over the loader output, split into ``valid`` / ``invalid`` buckets
   (channel-set match) with combined + valid-only + invalid-only views.
@@ -69,6 +76,9 @@ from .windowing import (
   enumerate_windows,
   get_record_windows,
 )
+from .dataset import (
+  RecordWindowDataset,
+)
 from .summary import (
   summarize_records,
   print_record_summary,
@@ -89,6 +99,8 @@ __all__ = [
   # from windowing
   "enumerate_windows",
   "get_record_windows",
+  # from dataset
+  "RecordWindowDataset",
   # from summary
   "summarize_records",
   "print_record_summary",

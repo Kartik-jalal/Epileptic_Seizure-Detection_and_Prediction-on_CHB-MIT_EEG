@@ -1,4 +1,4 @@
-"""Data subpackage: CHB-MIT loading, segmentation, filtering, windowing, and Dataset.
+"""Data subpackage: CHB-MIT loading, segmentation, filtering, windowing, Dataset, and splits.
 
 Currently exposes:
 
@@ -50,6 +50,13 @@ Currently exposes:
   in the pool — ready to wrap in ``torch.utils.data.ConcatDataset``.
   Optionally restricted to one ``inter_subject`` for intra-subject
   training.
+- :func:`split_cross_subject` / :func:`split_intra_subject` — 3-way
+  (train / val / test) split helpers, sitting between the segmentation
+  pools and :func:`build_record_datasets`. Cross-subject holds out one
+  whole subject for val and one for test; intra-subject picks one
+  patient and holds out one ictal + one interictal record per side.
+  Both return pool-shaped dicts that unpack directly into
+  :func:`build_record_datasets`.
 - :func:`summarize_records` / :func:`print_record_summary` — dataset-level
   stats over the loader output, split into ``valid`` / ``invalid`` buckets
   (channel-set match) with combined + valid-only + invalid-only views.
@@ -85,6 +92,10 @@ from .dataset import (
   RecordWindowDataset,
   build_record_datasets,
 )
+from .splits import (
+  split_cross_subject,
+  split_intra_subject,
+)
 from .summary import (
   summarize_records,
   print_record_summary,
@@ -108,6 +119,9 @@ __all__ = [
   # from dataset
   "RecordWindowDataset",
   "build_record_datasets",
+  # from splits
+  "split_cross_subject",
+  "split_intra_subject",
   # from summary
   "summarize_records",
   "print_record_summary",

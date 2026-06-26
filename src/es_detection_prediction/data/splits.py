@@ -10,16 +10,46 @@ Two split strategies are provided:
 
 - :func:`split_cross_subject` — holds out **one whole subject** for
   test and another for val. Used for cross-subject training, where the
-  model is asked to generalise to a never-seen patient. ``chb12`` and
-  ``chb24`` contains no interictal pool and auto-join training as
-  ictal-only contributors but cannot be held out for val/test (sensitivity
-  needs ictal, FA/h needs interictal — they must have both).
+  model is asked to generalise to a never-seen patient. Subjects
+  present in only one pool (on the standard CHB-MIT config that's
+  ``chb12`` and ``chb24`` — they contain no interictal records)
+  automatically join training as that pool's contributors but cannot
+  be held out for val/test (sensitivity needs ictal, FA/h needs
+  interictal — val/test subjects must have both).
 - :func:`split_intra_subject` — picks one patient and holds out one of
   their ictal records + one of their interictal records each for val
   and test. Used for per-patient training where one
   model is trained per patient. Requires the patient to have ≥
   ``minimum_records_per_type`` records of each type (default 3 = 1 train
   + 1 val + 1 test).
+
+Continuous-stream test pool (the ``test_continuous`` key)
+---------------------------------------------------------
+Each split also carries a ``test_continuous`` pool, the records that
+the downstream continuous Dataset will stream through the model +
+post-processing state machine for event-level evaluation.
+The cross / intra asymmetry is intentional and reflects what each
+mode's held-out unit actually means:
+
+- **Cross-subject**: the whole subject is novel test data, so
+  ``test_continuous`` is **every channel-valid record of the held-out
+  subject**, sorted chronologically. This includes records the eligibility
+  filter discarded for the n-hour ictal buffer — those carry the held-out
+  subject's pre/post-ictal time, which is genuinely test data here.
+  :func:`split_cross_subject` invokes :func:`band_pass_filtering` inline
+  on the test subject's all-valid records so the buffer-discarded ones
+  (not in the main eligibility pools) also get cached and have their
+  ``filtered_path`` set, ready for the continuous Dataset to slice from.
+- **Intra-subject**: only the test ictal + test interictal records are
+  novel. Other records of the patient were either in training
+  (interictal pool) or contain pre/post-ictal time of *training*
+  seizures (the buffer-discarded records). Including those in
+  ``test_continuous`` would contaminate the metric. So
+  ``test_continuous`` is just ``[test_ictal_record, test_interictal_record]``,
+  sorted by ``record_meas_date`` for chronological streaming. No
+  inline filter call is needed because both records already carry
+  ``filtered_path`` from the user's main :func:`band_pass_filtering`
+  pass over the eligibility pools.
 
 Independence of ictal / interictal selection (intra-subject)
 ------------------------------------------------------------
@@ -37,10 +67,14 @@ signal.
 
 import numpy as np
 
+from .preprocessing import band_pass_filtering
+
 
 def split_cross_subject(
     ictal_records: dict,
     interictal_records: dict,
+    loader_records: list,
+    band_pass_filtering_kwargs: dict,
     val_subject: str | None = None,
     test_subject: str | None = None,
     seed: int | None = None,
@@ -50,14 +84,43 @@ def split_cross_subject(
     Picks one subject for val and one for test (random from eligible
     subjects unless explicitly specified), and assigns everyone else
     to training. Subjects present in only one pool (e.g. ``chb12``,
-    ``chb24``) automatically join training as thier specific pool contributors,
-    since they can't serve as val/test (val/test need both classes for the
-    early-stopping metric and for FA/h).
+    ``chb24`` on the standard CHB-MIT config) automatically join
+    training as their pool's contributors, since they can't serve as
+    val/test (val/test need both classes for the early-stopping metric
+    and for FA/h).
+
+    Side effect — inline :func:`band_pass_filtering` call. After the
+    test subject is decided, this function calls
+    :func:`band_pass_filtering` on **every channel-valid record of the
+    held-out subject** so the buffer-discarded records (not in the
+    eligibility pools) also get filtered and cached. This ensures the
+    ``test_continuous`` pool's records all carry a ``filtered_path``
+    by the time the function returns, ready for the continuous
+    Dataset. The filter call is idempotent — records already cached
+    from the user's main filtering pass are re-used, only the
+    buffer-discarded records pay the actual filter cost.
 
     Args:
         ictal_records: From :func:`find_eligible_records`. Keyed by
             subject; values are per-subject lists of ictal record dicts.
         interictal_records: Same shape as ``ictal_records``.
+        loader_records: The full record list from :func:`load_records`.
+            Needed to enumerate the held-out subject's records that
+            were dropped by the eligibility filter (buffer-zone records)
+            but still belong in the continuous-stream test pool. Must
+            be channel-valid (``is_valid=True``) entries.
+        band_pass_filtering_kwargs: Keyword arguments forwarded to
+            :func:`band_pass_filtering` for the inline filter pass on
+            the held-out subject's records. Typically::
+
+                {
+                    "output_dir": chb_mit_filtered_dir,    # SAME as main pipeline
+                    "l_freq": 0.5, "h_freq": 50,
+                    "h_trans_bandwidth": 4,
+                }
+
+            Use the same ``output_dir`` as the main pipeline so cache
+            hits avoid redundant filtering and disk usage.
         val_subject: If given, use this subject for val. Otherwise
             randomly picked from shared subjects (subject to ``seed``).
         test_subject: If given, use this subject for test. Otherwise
@@ -70,9 +133,16 @@ def split_cross_subject(
 
             "val_subject":  str       # held out for val
             "test_subject": str       # held out for test
-            "training": {"ictal": ictal_pool, "interictal": interictal_pool}
-            "val":      {"ictal": ictal_pool, "interictal": interictal_pool}
-            "test":     {"ictal": ictal_pool, "interictal": interictal_pool}
+            "training":        {"ictal": ictal_pool, "interictal": interictal_pool}
+            "val":             {"ictal": ictal_pool, "interictal": interictal_pool}
+            "test":            {"ictal": ictal_pool, "interictal": interictal_pool}
+            "test_continuous": {test_subject: [record, record, ...]}
+
+        ``test_continuous`` contains every channel-valid record of the
+        held-out subject, in chronological order (by``record_meas_date``).
+        Used by the continuous Dataset for event-level FA/h, latency, 
+        and seizure sensitivity scoring against the post-processing state
+        machine.
 
     Raises:
         ValueError: If fewer than 3 subjects are present in both pools,
@@ -121,6 +191,38 @@ def split_cross_subject(
         if s != val_subject and s != test_subject
     ] + training_only_subjects
 
+    # Build the test_continuous pool: every channel-valid record of
+    # the held-out subject, in chronological order. Loader records are
+    # already sorted by meas_date within each subject (see dataloader),
+    # but we sort here explicitly so the ContinuousRecordDataset's
+    # streaming order doesn't depend on an implicit loader invariant.
+    # Shallow-copy each record so band_pass_filtering's `filtered_path` mutation
+    # lands on these per-split entries, not on the original loader records.
+    test_subject_records = sorted(
+        [
+            record.copy() # shallow copy
+            for record in loader_records
+            if record['subject'] == test_subject and record['is_valid']
+        ],
+        key=lambda r: r['record_meas_date'],
+    )
+    test_subject_loader_records = {test_subject: test_subject_records}
+
+    # Idempotent filter pass: records that were already filtered as
+    # part of the main pool pass (the test subject's ictal/interictal
+    # eligibility entries) hit the cache; only the buffer-discarded
+    # records (not in the pools) pay the actual filter cost. After this
+    # call, every record in test_subject_loader_records carries a
+    # `filtered_path` ready for the continuous Dataset.
+    band_pass_filtering(
+        pool=test_subject_loader_records,
+        desc=(
+            f"Filtering and Saving Test Subject all Valid Records for "
+            f"Continuous Window Testing"
+        ),
+        **band_pass_filtering_kwargs,
+    )
+
     # Pool subset helper: filter a pool dict to the listed subjects.
     # The `if s in pool` guard lets us pass training_only subjects
     # (who appear in ictal_records but not interictal_records) without
@@ -143,6 +245,7 @@ def split_cross_subject(
             "ictal":      pool_subset(ictal_records, [test_subject]),
             "interictal": pool_subset(interictal_records, [test_subject]),
         },
+        "test_continuous": test_subject_loader_records
     }
 
 
@@ -190,10 +293,19 @@ def split_intra_subject(
             "test_ictal_record":      str
             "val_interictal_record":  str   # held-out interictal record filename
             "test_interictal_record": str
-            "training": {"ictal": ictal_pool, "interictal": interictal_pool}
-            "val":      {"ictal": ictal_pool, "interictal": interictal_pool}
-            "test":     {"ictal": ictal_pool, "interictal": interictal_pool}
+            "training":        {"ictal": ictal_pool, "interictal": interictal_pool}
+            "val":             {"ictal": ictal_pool, "interictal": interictal_pool}
+            "test":             {"ictal": ictal_pool, "interictal": interictal_pool}
+            "test_continuous": {subject: [test_ictal_record, test_interictal_record]}
 
+        ``test_continuous`` contains ONLY the two test records
+        (chronologically sorted by ``record_meas_date``) — NOT the
+        buffer-discarded records adjacent to other (training) seizures,
+        which would contaminate the continuous metric. See the module
+        docstring for the cross / intra asymmetry. Both records already
+        carry a ``filtered_path`` from the user's main
+        :func:`band_pass_filtering` pass over the eligibility pools,
+        so no inline filter call is needed here.
 
     Raises:
         ValueError: If ``minimum_records_per_type`` is < 3, if no subject
@@ -275,5 +387,11 @@ def split_intra_subject(
         "test": {
             "ictal":      {subject: [test_ictal_rec]},
             "interictal": {subject: [test_inter_rec]},
+        },
+        "test_continuous": {
+            subject: sorted(
+                [test_ictal_rec, test_inter_rec],
+                key=lambda record: record['record_meas_date']
+            )
         },
     }

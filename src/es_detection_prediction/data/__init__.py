@@ -55,8 +55,13 @@ Currently exposes:
   pools and :func:`build_record_datasets`. Cross-subject holds out one
   whole subject for val and one for test; intra-subject picks one
   patient and holds out one ictal + one interictal record per side.
-  Both return pool-shaped dicts that unpack directly into
-  :func:`build_record_datasets`.
+  Both return pool-shaped dicts (``{"ictal": pool, "interictal": pool}``
+  per split) that unpack directly into :func:`build_record_datasets`.
+  Both also return a ``"test_continuous"`` pool for event-level
+  evaluation: cross-subject includes every channel-valid record of the
+  held-out subject and invokes :func:`band_pass_filtering` inline so the
+  buffer-discarded records also have ``filtered_path`` set; intra-subject
+  includes only the two held-out records from test split.
 - :func:`summarize_records` / :func:`print_record_summary` — dataset-level
   stats over the loader output, split into ``valid`` / ``invalid`` buckets
   (channel-set match) with combined + valid-only + invalid-only views.

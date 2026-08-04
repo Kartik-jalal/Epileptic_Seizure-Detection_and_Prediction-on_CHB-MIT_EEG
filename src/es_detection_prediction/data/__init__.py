@@ -38,7 +38,8 @@ Currently exposes:
   the ictal multi-seizure flattening. Consumed by
   :class:`RecordWindowDataset`.
 - :class:`RecordWindowDataset` — PyTorch ``Dataset`` wrapping one
-  filtered record's windows. Lazily opens the cached FIF on first
+  filtered record's **eligibility-filtered** windows, for training and
+  curated segment-level test. Lazily opens the cached FIF on first
   ``__getitem__`` (per ``DataLoader`` worker, so the parent never holds
   an open file descriptor — safe across ``fork()``). Serves
   ``(X, y)`` tensors of shape ``((1, n_channels, n_times), ())`` in
@@ -50,6 +51,21 @@ Currently exposes:
   in the pool — ready to wrap in ``torch.utils.data.ConcatDataset``.
   Optionally restricted to one ``inter_subject`` for intra-subject
   training.
+- :class:`ContinuousRecordDataset` — the event-level test counterpart.
+  Same lazy-open machinery, but windows cover the **whole** record with
+  no eligibility filtering (pre-/post-ictal stretches included, because
+  a deployed device would see them) at a finer stride, and it serves
+  ``(X, position)`` rather than ``(X, y)``. No label: a window's
+  scoring category depends on the interictal pool, which the Dataset
+  can't see, so the scoring loop derives it from ``position`` instead.
+- :func:`build_continuous_datasets` / :func:`continuous_collate_fn` —
+  the builder and collate for the above. The builder walks a split's
+  ``"test_continuous"`` pool and returns per-record Datasets in
+  **chronological order** (load-bearing: the post-processing state
+  machine is stateful). The collate keeps ``position`` as a list of
+  dicts rather than the dict-of-lists ``default_collate`` would
+  produce — an ergonomics choice for the scoring loop, not a
+  requirement. Pair both with ``DataLoader(shuffle=False)``.
 - :func:`split_cross_subject` / :func:`split_intra_subject` — 3-way
   (train / val / test) split helpers, sitting between the segmentation
   pools and :func:`build_record_datasets`. Cross-subject holds out one
@@ -96,6 +112,9 @@ from .windowing import (
 from .dataset import (
   RecordWindowDataset,
   build_record_datasets,
+  ContinuousRecordDataset,
+  build_continuous_datasets,
+  continuous_collate_fn,
 )
 from .splits import (
   split_cross_subject,
@@ -124,6 +143,9 @@ __all__ = [
   # from dataset
   "RecordWindowDataset",
   "build_record_datasets",
+  "ContinuousRecordDataset",
+  "build_continuous_datasets",
+  "continuous_collate_fn",
   # from splits
   "split_cross_subject",
   "split_intra_subject",

@@ -49,8 +49,6 @@ Currently exposes:
   (``ictal_records`` or ``interictal_records``), returns a flat
   **list** of :class:`RecordWindowDataset` instances — one per record
   in the pool — ready to wrap in ``torch.utils.data.ConcatDataset``.
-  Optionally restricted to one ``inter_subject`` for intra-subject
-  training.
 - :class:`ContinuousRecordDataset` — the event-level test counterpart.
   Same lazy-open machinery, but windows cover the **whole** record with
   no eligibility filtering (pre-/post-ictal stretches included, because
@@ -66,6 +64,13 @@ Currently exposes:
   dicts rather than the dict-of-lists ``default_collate`` would
   produce — an ergonomics choice for the scoring loop, not a
   requirement. Pair both with ``DataLoader(shuffle=False)``.
+- :func:`build_split_datasets` — compose fold-level ``ConcatDataset``s
+  from the dict returned by :func:`split_cross_subject` /
+  :func:`split_intra_subject`: ``training`` / ``val`` / ``test`` wrap
+  :class:`RecordWindowDataset`, ``test_continuous`` wraps
+  :class:`ContinuousRecordDataset`. Output keys mirror the input —
+  present only if present in the split. The one-call path from split
+  to DataLoader-ready fold.
 - :func:`split_cross_subject` / :func:`split_intra_subject` — 3-way
   (train / val / test) split helpers, sitting between the segmentation
   pools and :func:`build_record_datasets`. Cross-subject holds out one
@@ -92,6 +97,12 @@ Currently exposes:
 - :func:`print_excluded_subject_details` — diagnostic dump for those
   excluded subjects (per-record seizure counts, durations and record
   length), so you can see *why* the buffer rejected them.
+- :func:`summarize_split_datasets` / :func:`print_split_datasets_summary`
+  — the third summarize/print pair, over the fold-level ConcatDatasets
+  returned by :func:`build_split_datasets`. Per-split record and window
+  counts by class plus the interictal:ictal window imbalance ratio 
+  (undersampling number), computed O(#records) from each per-record
+  Dataset's ``label``/``len`` without materialising per-window labels.
 """
 
 from .dataloader import (
@@ -115,6 +126,7 @@ from .dataset import (
   ContinuousRecordDataset,
   build_continuous_datasets,
   continuous_collate_fn,
+  build_split_datasets,
 )
 from .splits import (
   split_cross_subject,
@@ -126,6 +138,8 @@ from .summary import (
   summarize_eligible_records,
   print_eligible_records_summary,
   print_excluded_subject_details,
+  summarize_split_datasets,
+  print_split_datasets_summary,
 )
 
 __all__ = [
@@ -146,6 +160,7 @@ __all__ = [
   "ContinuousRecordDataset",
   "build_continuous_datasets",
   "continuous_collate_fn",
+  "build_split_datasets",
   # from splits
   "split_cross_subject",
   "split_intra_subject",
@@ -155,4 +170,6 @@ __all__ = [
   "summarize_eligible_records",
   "print_eligible_records_summary",
   "print_excluded_subject_details",
+  "summarize_split_datasets",
+  "print_split_datasets_summary",
 ]

@@ -18,8 +18,11 @@ windows out of it lazily — they differ in *which* windows they expose and
   :func:`build_continuous_datasets` builds one per ``test_continuous``
   entry, and :func:`continuous_collate_fn` batches them.
 
-Compose either variant with :class:`torch.utils.data.ConcatDataset` to
-form a fold-level Dataset.
+:func:`build_split_datasets` composes both variants into a
+DataLoader-ready fold (one ``ConcatDataset`` per split) straight from a
+split-function dict — the usual one-call path from split to training.
+Manual composition via :class:`torch.utils.data.ConcatDataset` works
+too, when a fold needs custom filtering.
 
 Lazy-open semantics (and why it matters for ``DataLoader`` workers)
 -------------------------------------------------------------------
@@ -43,9 +46,10 @@ the parent process; each worker only opens what it actually touches in
 its working set.
 """
 
-import torch
-from torch.utils.data import Dataset
 import mne
+import torch
+from torch.utils.data import Dataset, ConcatDataset
+
 
 from .windowing import get_record_windows, enumerate_windows
 
@@ -64,8 +68,7 @@ class RecordWindowDataset(Dataset):
     - :attr:`subject` (``str``): the subject this record belongs to
       (e.g. ``"chb05"``). Filter on this for cross-subject splits.
     - :attr:`record_name` (``str``): the EDF filename this record came
-      from (e.g. ``"chb05_06.edf"``). Filter on this for intra-subject
-      LOSO over seizures.
+      from (e.g. ``"chb05_06.edf"``).
     - :attr:`label` (``int``): ``0`` for interictal, ``1`` for ictal.
     - :attr:`windows` (``list[tuple[float, float]]``): the
       ``(start, end)`` window bounds in record-relative seconds, as
@@ -188,7 +191,6 @@ def build_record_datasets(
     label: int,
     segment_length: float,
     stride: float | None = None,
-    inter_subject: str | None = None,
 ) -> list[RecordWindowDataset]:
     """Construct one :class:`RecordWindowDataset` per pool entry.
 
@@ -200,25 +202,17 @@ def build_record_datasets(
             Dataset produced by this call.
         segment_length: Forwarded to :class:`RecordWindowDataset`.
         stride: Forwarded to :class:`RecordWindowDataset`.
-        inter_subject: If given, restrict the build to this subject's
-            records only. Used for **intra-subject (per-patient)
-            training** — the whole working dataset is
-            scoped to one patient before doing LOSO over their own
-            seizures. For **cross-subject** splits,
-            leave this ``None`` and filter on
-            :attr:`RecordWindowDataset.subject` after construction
-            instead.
 
     Returns:
-        Flat list of :class:`RecordWindowDataset` instances (across
-        every subject in ``pool``, or just one if ``inter_subject`` is
-        set). Wrap in :class:`torch.utils.data.ConcatDataset` to form a
-        single Dataset suitable for ``DataLoader``.
+        Flat list of :class:`RecordWindowDataset` instances, one per
+        record across every subject in ``pool``. Wrap in
+        :class:`torch.utils.data.ConcatDataset` to form a single
+        Dataset suitable for ``DataLoader``.
+
     """
     return [
         RecordWindowDataset(record, label, segment_length, stride)
-        for subject, records in pool.items()
-        if inter_subject is None or subject == inter_subject
+        for records in pool.values()
         for record in records
     ]
 
@@ -460,3 +454,83 @@ def build_continuous_datasets(
         for records in test_continuous.values()
         for record in records
     ]
+
+
+def build_split_datasets(
+    splits: dict,
+    segment_length: float,
+    stride: float | None = None,
+    continuous_stride: float = 1.0,
+    pool_labels: dict | None = None,
+) -> dict:
+    """Compose fold-level ``ConcatDataset``s from a split's pools.
+
+    The one-call bridge between the split layer and the training loop:
+    takes the dict returned by :func:`split_cross_subject` /
+    :func:`split_intra_subject` and wraps every pool of every split in
+    the right Dataset class, so a notebook goes from split to
+    DataLoader-ready fold in a single call.
+
+    Args:
+        splits: The dict returned by :func:`split_cross_subject` or
+            :func:`split_intra_subject`. The ``"training"`` / ``"val"`` /
+            ``"test"`` entries are ``{"ictal": pool, "interictal": pool}``
+            dicts; ``"test_continuous"`` is a plain pool.
+        segment_length: Window length, in seconds. Forwarded to both
+            builders — one value for the whole fold, since the model's
+            input shape is fixed by it.
+        stride: Step between consecutive window starts for the curated
+            splits, in seconds. Forwarded to
+            :func:`build_record_datasets`; ``None`` → non-overlapping.
+            See :class:`RecordWindowDataset` for details.
+        continuous_stride: Step for the event-level stream, in seconds.
+            Forwarded to :func:`build_continuous_datasets`; the 1.0 s
+            default gives fine detection-latency resolution. See
+            :class:`ContinuousRecordDataset` for details.
+        pool_labels: Maps pool name → integer class label. Defaults to
+            ``{"interictal": 0, "ictal": 1}`` (the Detection Phase contract).
+            A parameter rather than a hardcoded map so PredictionPhase 2 can
+            pass ``{"interictal": 0, "preictal": 1}`` without touching this
+            function. An unknown pool name raises ``KeyError`` — by
+            design, so a typo'd or unexpected pool fails loudly instead
+            of being silently mislabelled.
+
+    Returns:
+        Dict of fold-level ``ConcatDataset``s —
+        ``{"training": ..., "val": ..., "test": ..., "test_continuous": ...}``
+        — each key present only if it was present in ``splits``.
+    """
+    if pool_labels is None:
+        # Default built inside the function, not in the signature: a
+        # mutable default dict would be shared across every call (the
+        # classic Python default-argument trap).
+        pool_labels = {"interictal": 0, "ictal": 1}
+
+    fold = {}
+    for split_name in ("training", "val", "test"):
+        if split_name not in splits:
+            continue
+
+        record_datasets = []
+        for pool_name, pool in splits[split_name].items():
+            record_datasets.extend(
+                build_record_datasets(
+                    pool=pool,
+                    label=pool_labels[pool_name],  # KeyError on unknown pools, by design
+                    segment_length=segment_length,
+                    stride=stride,
+                )
+            )
+
+        fold[split_name] = ConcatDataset(record_datasets)
+
+    if "test_continuous" in splits:
+        fold["test_continuous"] = ConcatDataset(
+            build_continuous_datasets(
+                test_continuous=splits["test_continuous"],
+                segment_length=segment_length,
+                stride=continuous_stride,
+            )
+        )
+
+    return fold

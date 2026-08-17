@@ -36,9 +36,21 @@ pair returned by ``find_eligible_records``):
   *why* the buffer couldn't fit. Kept separate from the summary so the
   default printout doesn't get buried.
 
-None of these run automatically — the loader and segmentation modules stay
-focused on their own jobs. Call these from a notebook cell when you want
-the view.
+Fold-dataset helpers (over the dict returned by ``build_split_datasets``):
+
+- :func:`summarize_split_datasets` — pure compute. Per split, counts
+  records and windows by class straight from the per-record Datasets
+  (O(#records): reads each Dataset's ``label`` and ``len``, never
+  materialising per-window label lists). ``test_continuous`` reports
+  records and windows only, since continuous Datasets carry no label.
+- :func:`print_split_datasets_summary` — convenience formatter. One
+  aligned block per split, including the interictal:ictal window
+  imbalance ratio — the number the §9.6 undersampling choice hangs on,
+  and a quick check that val/test actually contain both classes.
+
+None of these run automatically — the loader, segmentation and dataset
+modules stay focused on their own jobs. Call these from a notebook cell
+when you want the view.
 """
 
 
@@ -429,3 +441,90 @@ def print_excluded_subject_details(
                 f" durations={durations}"
                 f" record_duration={record['record_total_duration']}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Fold-dataset helpers (over build_split_datasets output)
+# ---------------------------------------------------------------------------
+
+
+def summarize_split_datasets(fold_datasets: dict) -> dict:
+    """Compute per-split record/window counts over fold-level ConcatDatasets.
+
+    Counts come straight from the per-record Datasets — each carries one
+    ``label`` and one ``len`` — so the pass is O(#records), never
+    materialising a per-window label list (~650K entries for a
+    cross-subject training split).
+
+    Args:
+        fold_datasets: The dict returned by
+            :func:`...dataset.build_split_datasets` —
+            ``{"training": ConcatDataset, "val": ..., ...}``.
+
+    Returns:
+        Dict keyed like the input. Each curated split maps to::
+
+            interictal_records: int  # per-record Datasets with label 0
+            ictal_records:      int  # per-record Datasets with label 1
+            interictal_windows: int  # windows summed over label-0 Datasets
+            ictal_windows:      int  # windows summed over label-1 Datasets
+
+        ``test_continuous`` maps to ``records`` / ``windows`` only —
+        continuous Datasets carry no label, since scoring categories are
+        derived downstream at evaluation time.
+    """
+    info = {}
+    for split_name, dataset in fold_datasets.items():
+        if split_name == "test_continuous":
+            info[split_name] = {
+                "records": len(dataset.datasets),
+                "windows": len(dataset),
+            }
+            continue
+
+        # O(#records): each per-record Dataset has ONE label and ONE
+        # length, so class totals never need per-window label lists.
+        records, windows = {0: 0, 1: 0}, {0: 0, 1: 0}
+        for ds in dataset.datasets:
+            records[ds.label] += 1
+            windows[ds.label] += len(ds)
+        assert sum(windows.values()) == len(dataset)
+        info[split_name] = {
+            "interictal_records": records[0],
+            "ictal_records": records[1],
+            "interictal_windows": windows[0],
+            "ictal_windows": windows[1],
+        }
+    return info
+
+
+def print_split_datasets_summary(fold_datasets: dict) -> None:
+    """Pretty-print fold-dataset stats, one block per split.
+
+    Includes the interictal:ictal window imbalance ratio per curated
+    split — the number the undersampling / class-weight choice hangs on 
+    — and an immediate sanity check that val and test
+    contain both classes (an ictal count of zero would make the
+    early-stopping metric meaningless).
+
+    Args:
+        fold_datasets: The dict returned by
+            :func:`...dataset.build_split_datasets`.
+    """
+    info = summarize_split_datasets(fold_datasets)
+    title = "Fold datasets (windows per class)"
+    print(title)
+    print("=" * len(title))
+    for split_name, s in info.items():
+        print(f"  {split_name}")
+        if split_name == "test_continuous":
+            print(f"    records:                          {s['records']:>12,}")
+            print(f"    windows:                          {s['windows']:>12,}")
+            continue
+        ratio = (s["interictal_windows"] / s["ictal_windows"]
+                 if s["ictal_windows"] else float("inf"))
+        print(f"    ictal records:                    {s['ictal_records']:>12,}")
+        print(f"    interictal records:               {s['interictal_records']:>12,}")
+        print(f"    ictal windows:                    {s['ictal_windows']:>12,}")
+        print(f"    interictal windows:               {s['interictal_windows']:>12,}")
+        print(f"    imbalance (interictal : ictal):   {ratio:>11,.0f}:1")
